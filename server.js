@@ -2,6 +2,7 @@ import express from "express";
 import pkg from "pg";
 import dotenv from "dotenv";
 import cors from "cors";
+import fetch from "node-fetch";
 
 dotenv.config();
 const { Pool } = pkg;
@@ -18,7 +19,6 @@ const pool = new Pool({
   password: process.env.DB_PASSWORD,
 });
 
-
 // ===============================
 // 🔎 HEALTH CHECK
 // ===============================
@@ -26,6 +26,113 @@ app.get("/", (req, res) => {
   res.json({ status: "API rodando 🚀" });
 });
 
+app.post("/previsao", async (req, res) => {
+  const { cidade } = req.body;
+
+  try {
+    // 1. buscar clima real
+    const response = await fetch(
+      `https://api.openweathermap.org/data/2.5/weather?q=${cidade}&appid=${process.env.WEATHER_API_KEY}&units=metric&lang=pt_br`
+    );
+
+    const data = await response.json();
+
+    if (!data.weather || !data.main) {
+  return res.status(400).json({
+    erro: "Falha ao obter dados do clima",
+    resposta: data
+  });
+}
+
+  const clima = data.weather[0].description;
+  const temp = data.main.temp;
+
+    // 2. lógica de risco simples
+    let risco = "baixo";
+    let recomendacao = "monitoramento normal";
+
+    if (clima.includes("chuva") || clima.includes("tempestade")) {
+      risco = "alto";
+      recomendacao = "risco de alagamento e deslizamento - ativar equipes";
+    }
+
+    if (temp > 35) {
+      risco = "medio";
+      recomendacao = "risco de calor extremo - suporte à população";
+    }
+
+    // 3. resposta final
+    res.json({
+      cidade,
+      temperatura: temp,
+      clima,
+      risco,
+      recomendacao
+    });
+
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
+
+app.post("/previsao-inteligente", async (req, res) => {
+  const { cidade } = req.body;
+
+  try {
+    //  1. CLIMA REAL
+    const climaRes = await fetch(
+      `https://api.openweathermap.org/data/2.5/weather?q=${cidade}&appid=${process.env.WEATHER_API_KEY}&units=metric&lang=pt_br`
+    );
+    const climaData = await climaRes.json();
+
+    const clima = climaData.weather[0].description;
+    const temp = climaData.main.temp;
+
+    // 2. EVENTOS NASA (globais)
+    const nasaRes = await fetch(
+      "https://eonet.gsfc.nasa.gov/api/v3/events"
+    );
+    const nasaData = await nasaRes.json();
+
+    const eventosAtivos = nasaData.events.slice(0, 3).map(e => e.title);
+
+    //  3. LÓGICA DE RISCO
+    let risco = "baixo";
+    let recomendacao = "situação estável";
+
+    if (clima.includes("chuva") || clima.includes("tempestade")) {
+      risco = "alto";
+      recomendacao = "risco de enchentes e deslizamentos";
+    }
+
+    if (temp > 35) {
+      risco = "medio";
+      recomendacao = "risco de calor extremo";
+    }
+
+    if (eventosAtivos.length > 0) {
+      risco = "medio";
+    }
+
+    if (clima.includes("tempestade") && temp > 30) {
+      risco = "alto";
+      recomendacao = "situação crítica combinada (clima severo + instabilidade)";
+    }
+
+    // RESPOSTA FINAL
+    res.json({
+      cidade,
+      clima,
+      temperatura: temp,
+      eventos_globais: eventosAtivos,
+      risco,
+      recomendacao
+    });
+
+  } catch (err) {
+    res.status(500).json({ erro: err.message });
+  }
+});
 // ===============================
 // 🌪️ PREVISÃO DE DESASTRES
 // ===============================
