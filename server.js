@@ -3,14 +3,20 @@ import pkg from "pg";
 import dotenv from "dotenv";
 import cors from "cors";
 import fetch from "node-fetch";
+import whatsappRoutes from "./whatsapp.js";
 
 dotenv.config();
-const { Pool } = pkg;
 
+const { Pool } = pkg;
 const app = express();
+
 app.use(express.json());
 app.use(cors());
 
+// 🔗 rota do WhatsApp
+app.use("/whatsapp", whatsappRoutes);
+
+// 🔌 BANCO
 const pool = new Pool({
   host: process.env.DB_HOST,
   port: process.env.DB_PORT,
@@ -26,80 +32,51 @@ app.get("/", (req, res) => {
   res.json({ status: "API rodando 🚀" });
 });
 
+// ===============================
+// 🌪️ PREVISÃO INTELIGENTE (CLIMA + NASA + BANCO)
+// ===============================
 app.post("/previsao", async (req, res) => {
   const { cidade } = req.body;
 
   try {
-    // 1. buscar clima real
-    const response = await fetch(
-      `https://api.openweathermap.org/data/2.5/weather?q=${cidade}&appid=${process.env.WEATHER_API_KEY}&units=metric&lang=pt_br`
-    );
-
-    const data = await response.json();
-
-    if (!data.weather || !data.main) {
-  return res.status(400).json({
-    erro: "Falha ao obter dados do clima",
-    resposta: data
-  });
-}
-
-  const clima = data.weather[0].description;
-  const temp = data.main.temp;
-
-    // 2. lógica de risco simples
-    let risco = "baixo";
-    let recomendacao = "monitoramento normal";
-
-    if (clima.includes("chuva") || clima.includes("tempestade")) {
-      risco = "alto";
-      recomendacao = "risco de alagamento e deslizamento - ativar equipes";
-    }
-
-    if (temp > 35) {
-      risco = "medio";
-      recomendacao = "risco de calor extremo - suporte à população";
-    }
-
-    // 3. resposta final
-    res.json({
-      cidade,
-      temperatura: temp,
-      clima,
-      risco,
-      recomendacao
-    });
-
-  } catch (err) {
-    res.status(500).json({ erro: err.message });
-  }
-});
-
-app.post("/previsao-inteligente", async (req, res) => {
-  const { cidade } = req.body;
-
-  try {
-    //  1. CLIMA REAL
+    // 🔹 CLIMA
     const climaRes = await fetch(
       `https://api.openweathermap.org/data/2.5/weather?q=${cidade}&appid=${process.env.WEATHER_API_KEY}&units=metric&lang=pt_br`
     );
     const climaData = await climaRes.json();
 
+    if (!climaData.weather || !climaData.main) {
+      return res.status(400).json({
+        erro: "Erro ao buscar clima",
+        resposta: climaData,
+      });
+    }
+
     const clima = climaData.weather[0].description;
     const temp = climaData.main.temp;
 
-    // 2. EVENTOS NASA (globais)
+    // 🔹 NASA
     const nasaRes = await fetch(
       "https://eonet.gsfc.nasa.gov/api/v3/events"
     );
     const nasaData = await nasaRes.json();
 
-    const eventosAtivos = nasaData.events.slice(0, 3).map(e => e.title);
+    const eventosAtivos = nasaData.events
+      ? nasaData.events.slice(0, 3).map((e) => e.title)
+      : [];
 
-    //  3. LÓGICA DE RISCO
+    // 🔹 BANCO (ocorrências reais)
+    const ocorrencias = await pool.query(`
+      SELECT * FROM ocorrencias
+      ORDER BY gravidade DESC
+      LIMIT 3
+    `);
+
     let risco = "baixo";
     let recomendacao = "situação estável";
+    let desastres = [];
 
+    // 🔹 LÓGICA CLIMA
     if (clima.includes("chuva") || clima.includes("tempestade")) {
       risco = "alto";
       recomendacao = "risco de enchentes e deslizamentos";
@@ -110,82 +87,38 @@ app.post("/previsao-inteligente", async (req, res) => {
       recomendacao = "risco de calor extremo";
     }
 
-    if (eventosAtivos.length > 0) {
-      risco = "medio";
+    // 🔹 LÓGICA BANCO
+    if (ocorrencias.rows.length > 0) {
+      const media =
+        ocorrencias.rows.reduce((acc, o) => acc + o.gravidade, 0) /
+        ocorrencias.rows.length;
+
+      if (media >= 8) {
+        risco = "alto";
+        desastres = ["enchente", "deslizamento"];
+        recomendacao = "mobilizar equipes de resgate imediatamente";
+      } else if (media >= 5) {
+        risco = "medio";
+        desastres = ["alagamento"];
+        recomendacao = "preparar equipes de apoio";
+      }
     }
 
+    // 🔹 LÓGICA COMBINADA (mais forte)
     if (clima.includes("tempestade") && temp > 30) {
       risco = "alto";
-      recomendacao = "situação crítica combinada (clima severo + instabilidade)";
+      recomendacao = "situação crítica combinada (clima severo)";
     }
 
-    // RESPOSTA FINAL
     res.json({
       cidade,
       clima,
       temperatura: temp,
       eventos_globais: eventosAtivos,
-      risco,
-      recomendacao
-    });
-
-  } catch (err) {
-    res.status(500).json({ erro: err.message });
-  }
-});
-// ===============================
-// 🌪️ PREVISÃO DE DESASTRES
-// ===============================
-app.post("/previsao", async (req, res) => {
-  const { cidade } = req.body;
-
-  try {
-    // 🔥 pega ocorrências recentes
-    const ocorrencias = await pool.query(`
-      SELECT * FROM ocorrencias
-      ORDER BY gravidade DESC
-      LIMIT 3
-    `);
-
-    if (!ocorrencias.rows.length) {
-      return res.json({
-        cidade,
-        risco: "baixo",
-        possiveis_desastres: [],
-        recomendacao: "monitoramento padrão"
-      });
-    }
-
-    const gravidadeMedia =
-      ocorrencias.rows.reduce((acc, o) => acc + o.gravidade, 0) /
-      ocorrencias.rows.length;
-
-    let risco = "baixo";
-    let desastres = [];
-    let recomendacao = "";
-
-    // 🔥 lógica simples mas convincente
-    if (gravidadeMedia >= 8) {
-      risco = "alto";
-      desastres = ["enchente", "deslizamento"];
-      recomendacao = "mobilizar equipes de resgate e evacuação";
-    } else if (gravidadeMedia >= 5) {
-      risco = "medio";
-      desastres = ["alagamento", "interrupções logísticas"];
-      recomendacao = "preparar equipes de apoio e logística";
-    } else {
-      risco = "baixo";
-      desastres = ["impactos leves"];
-      recomendacao = "monitorar situação";
-    }
-
-    res.json({
-      cidade,
-      risco,
       possiveis_desastres: desastres,
-      recomendacao
+      risco,
+      recomendacao,
     });
-
   } catch (err) {
     res.status(500).json({ erro: err.message });
   }
@@ -198,23 +131,28 @@ app.post("/match", async (req, res) => {
   const { habilidades, cidade } = req.body;
 
   try {
-    // 1. Buscar cenário mais crítico
     const ocorrencia = await pool.query(`
       SELECT * FROM ocorrencias
       ORDER BY gravidade DESC
       LIMIT 1
     `);
 
+    if (!ocorrencia.rows.length) {
+      return res.status(400).json({
+        erro: "Nenhuma ocorrência encontrada",
+      });
+    }
+
     const localCritico = ocorrencia.rows[0];
 
-    // 2. Definir tipo de necessidade baseado na gravidade
     let tipoNecessidade = "apoio";
-
     if (localCritico.gravidade >= 8) tipoNecessidade = "resgate";
-    else if (localCritico.gravidade >= 5) tipoNecessidade = "logistica";
+    else if (localCritico.gravidade >= 5)
+      tipoNecessidade = "logistica";
 
-    // 3. Mapear habilidades → grupo
-    const habilidadesUsuario = habilidades.map(h => h.toLowerCase());
+    const habilidadesUsuario = habilidades.map((h) =>
+      h.toLowerCase()
+    );
 
     let grupo = "Apoio";
 
@@ -235,7 +173,6 @@ app.post("/match", async (req, res) => {
       grupo = "Atendimento";
     }
 
-    // 4. Buscar melhores voluntários similares (ranking)
     const voluntarios = await pool.query(`
       SELECT v.nome, AVG(p.desempenho) as media
       FROM voluntarios v
@@ -246,30 +183,28 @@ app.post("/match", async (req, res) => {
       LIMIT 3
     `);
 
-    // 5. Definir tarefas
     let tarefas = [];
 
     if (grupo === "Resgate") {
       tarefas = [
         "Atuar em áreas de risco",
         "Auxiliar no resgate de vítimas",
-        "Apoiar equipes de emergência"
+        "Apoiar equipes de emergência",
       ];
     } else if (grupo === "Logistica") {
       tarefas = [
         "Organizar suprimentos",
         "Distribuir doações",
-        "Gerenciar recursos"
+        "Gerenciar recursos",
       ];
     } else {
       tarefas = [
         "Acolher vítimas",
         "Fornecer informações",
-        "Apoiar comunicação"
+        "Apoiar comunicação",
       ];
     }
 
-    // 6. Resposta final
     res.json({
       cidade,
       local_critico: localCritico.local,
@@ -277,27 +212,21 @@ app.post("/match", async (req, res) => {
       tipo_necessidade: tipoNecessidade,
       grupo_recomendado: grupo,
       tarefas,
-      voluntarios_destaque: voluntarios.rows
+      voluntarios_destaque: voluntarios.rows,
     });
-
   } catch (err) {
     res.status(500).json({ erro: err.message });
   }
 });
 
-
 // ===============================
-// LISTAR HABILIDADES
+// 📋 LISTAGENS
 // ===============================
 app.get("/habilidades", async (req, res) => {
   const result = await pool.query("SELECT * FROM habilidades");
   res.json(result.rows);
 });
 
-
-// ===============================
-// LISTAR VOLUNTÁRIOS
-// ===============================
 app.get("/voluntarios", async (req, res) => {
   const result = await pool.query("SELECT * FROM voluntarios");
   res.json(result.rows);
